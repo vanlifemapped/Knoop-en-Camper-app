@@ -1,4 +1,81 @@
-<!DOCTYPE html>
+// 🌐 Verbeterde Data Lader (pakt álle types knooppunten)
+async function fetchDataForBounds() {
+    if (map.getZoom() < 9) return; 
+
+    let bounds = map.getBounds();
+    let bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+    
+    // Brede query die alle varianten van knooppunten in NL/BE vindt
+    let query = `
+        [out:json][timeout:20];
+        (
+          node["rcn_ref"](${bbox});
+          node["rwn_ref"](${bbox});
+          node["network:type"="node_network"](${bbox});
+          node["tourism"="caravan_site"](${bbox});
+          node["tourism"="camp_site"](${bbox});
+        );
+        out body;
+    `;
+    
+    // Gebruik een snellere, betrouwbaardere spiegelserver
+    let url = "https://lz4.overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+
+    try {
+        let response = await fetch(url);
+        if (!response.ok) {
+            // Backup server als de eerste weigert
+            url = "https://overpass.kumi.systems/api/interpreter?data=" + encodeURIComponent(query);
+            response = await fetch(url);
+        }
+        
+        let data = await response.json();
+
+        data.elements.forEach(el => {
+            if (!el.tags) return;
+
+            // 1. Fietsknooppunten (pakt rcn_ref, rwn_ref of ref)
+            let nodeNum = el.tags.rcn_ref || el.tags.rwn_ref || el.tags.ref || el.tags["expected_rcn_ref"];
+            
+            if (nodeNum) {
+                let nodeKey = `${nodeNum}_${el.lat.toFixed(4)}_${el.lon.toFixed(4)}`;
+
+                if (!loadedNodes[nodeKey]) {
+                    let isVisited = visitedSet.has(nodeKey) || visitedSet.has(nodeNum);
+
+                    let icon = L.divIcon({
+                        className: 'node-icon' + (isVisited ? ' visited' : ''),
+                        html: nodeNum,
+                        iconSize: [28, 28]
+                    });
+
+                    let marker = L.marker([el.lat, el.lon], { icon: icon }).addTo(map);
+
+                    marker.on('click', function() {
+                        if (visitedSet.has(nodeKey)) {
+                            visitedSet.delete(nodeKey);
+                            marker.getElement()?.classList.remove('visited');
+                        } else {
+                            visitedSet.add(nodeKey);
+                            marker.getElement()?.classList.add('visited');
+                        }
+                        saveState();
+                    });
+
+                    loadedNodes[nodeKey] = marker;
+                }
+            }
+
+            // 2. Camperplaatsen
+            if (el.tags.tourism === 'caravan_site' || el.tags.tourism === 'camp_site') {
+                let name = el.tags.name || 'Camperplaats / Camping';
+                addCamperMarker(el.lat, el.lon, `<b>${name}</b><br>Bron: OpenStreetMap`);
+            }
+        });
+    } catch (err) {
+        console.log("Fout of overbelasting bij ophalen knooppunten:", err);
+    }
+}!DOCTYPE html>
 <html lang="nl">
 <head>
     <meta charset="UTF-8">
