@@ -1,4 +1,298 @@
-// 🌐 Verbeterde Data Lader (pakt álle types knooppunten)
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knoop & Camper</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: white; }
+        #app { display: flex; flex-direction: column; height: 100vh; }
+        
+        header { background: #1e293b; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid #334155; }
+        .top-row { display: flex; justify-content: space-between; align-items: center; }
+        h1 { margin: 0; font-size: 1.1rem; color: #38bdf8; display: flex; align-items: center; gap: 6px; }
+        
+        .search-bar { display: flex; gap: 6px; }
+        .search-input { flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; font-size: 0.9rem; outline: none; }
+        .search-btn { background: #38bdf8; color: #0f172a; border: none; padding: 8px 12px; border-radius: 8px; font-weight: bold; cursor: pointer; }
+
+        .upload-btn { background: #0284c7; color: white; padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; gap: 6px; }
+        #gpx-file { display: none; }
+
+        #map { flex: 1; width: 100%; }
+        
+        .stats-bar { background: #1e293b; padding: 12px; display: flex; justify-content: space-around; font-weight: bold; border-top: 1px solid #334155; }
+        .stat-item { text-align: center; }
+        .stat-val { color: #22c55e; font-size: 1.2rem; display: block; }
+        
+        /* Markers Styling */
+        .node-icon { background: #0284c7; border: 2px solid white; color: white; font-weight: bold; border-radius: 50%; text-align: center; line-height: 28px; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
+        .node-icon.visited { background: #22c55e; color: white; border: 2px solid white; box-shadow: 0 0 14px rgba(34, 197, 94, 0.9); transform: scale(1.15); z-index: 9999 !important; }
+        
+        .camper-pin { font-size: 22px; text-align: center; line-height: 30px; filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.5)); }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <header>
+        <div class="top-row">
+            <h1>🚴 Knoop & Camper</h1>
+            <label for="gpx-file" class="upload-btn">
+                📂 Upload GPX
+            </label>
+            <input type="file" id="gpx-file" />
+        </div>
+        <div class="search-bar">
+            <input type="text" id="search-input" class="search-input" placeholder="🔍 Zoek plaats (bijv. Oploo, Culemborg...)" />
+            <button class="search-btn" onclick="searchLocation()">Zoek</button>
+        </div>
+    </header>
+    
+    <div id="map"></div>
+
+    <div class="stats-bar">
+        <div class="stat-item">
+            <span id="visited-count" class="stat-val">0</span>
+            Afgevinkt
+        </div>
+        <div class="stat-item">
+            <span id="camper-count" class="stat-val">0</span>
+            Camperplekken
+        </div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+    // 1. Kaart Initialisatie (OpenFietsMap / OSM Hot)
+    const map = L.map('map').setView([51.5750, 5.8900], 11);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 19
+    }).addTo(map);
+
+    // 💾 Permanente Opslag
+    let visitedSet = new Set(JSON.parse(localStorage.getItem('visitedNodesSet') || '[]'));
+    let customCamperSpots = JSON.parse(localStorage.getItem('customCamperSpots') || '[]');
+    
+    let loadedNodes = {};
+    let loadedCampers = {};
+    let loadTimeout = null;
+
+    updateCounters();
+
+    // Custom Camperplekken inladen uit geheugen
+    customCamperSpots.forEach(spot => {
+        addCamperMarker(spot.lat, spot.lng, "<b>Eigen Camperplaats</b><br>Toegevoegd op " + spot.date, true);
+    });
+
+    function saveState() {
+        localStorage.setItem('visitedNodesSet', JSON.stringify(Array.from(visitedSet)));
+        localStorage.setItem('customCamperSpots', JSON.stringify(customCamperSpots));
+        updateCounters();
+    }
+
+    function updateCounters() {
+        document.getElementById('visited-count').innerText = visitedSet.size;
+        let totalCampers = Object.keys(loadedCampers).length + customCamperSpots.length;
+        document.getElementById('camper-count').innerText = totalCampers;
+    }
+
+    // Handmatig Camperplaats toevoegen via Rechtermuisknop / Lang indrukken
+    map.on('contextmenu', function(e) {
+        let dateStr = new Date().toLocaleDateString('nl-NL');
+        addCamperMarker(e.latlng.lat, e.latlng.lng, "<b>Eigen Camperplaats</b><br>Toegevoegd op " + dateStr, true);
+        customCamperSpots.push({ lat: e.latlng.lat, lng: e.latlng.lng, date: dateStr });
+        saveState();
+    });
+
+    function addCamperMarker(lat, lng, popupText, isCustom = false) {
+        let key = `${lat.toFixed(4)}_${lng.toFixed(4)}`;
+        if (loadedCampers[key]) return;
+
+        let marker = L.marker([lat, lng], {
+            icon: L.divIcon({ html: '🚐', className: 'camper-pin', iconSize: [30, 30] })
+        }).addTo(map).bindPopup(popupText);
+
+        if (!isCustom) {
+            loadedCampers[key] = marker;
+        }
+        updateCounters();
+    }
+
+    // 🔍 Zoekfunctie
+    async function searchLocation() {
+        let query = document.getElementById('search-input').value.trim();
+        if (!query) return;
+
+        let cleanQuery = query.replace(/\d+/g, '').trim(); 
+        if (!cleanQuery) cleanQuery = query;
+
+        try {
+            let res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanQuery + ' Nederland')}`);
+            let data = await res.json();
+            if (data.length > 0) {
+                map.setView([parseFloat(data[0].lat), parseFloat(data[0].lon)], 11);
+            } else {
+                alert('Plaatsnaam niet gevonden.');
+            }
+        } catch(e) {
+            alert('Fout bij zoeken: ' + e.message);
+        }
+    }
+
+    document.getElementById('search-input').addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') searchLocation();
+    });
+
+    // 🌐 Slimme Data Lader (Fietsknooppunten + Camperplaatsen)
+    async function fetchDataForBounds() {
+        if (map.getZoom() < 9) return; 
+
+        let bounds = map.getBounds();
+        let bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+        
+        let query = `
+            [out:json][timeout:20];
+            (
+              node["rcn_ref"](${bbox});
+              node["rwn_ref"](${bbox});
+              node["network:type"="node_network"](${bbox});
+              node["tourism"="caravan_site"](${bbox});
+              node["tourism"="camp_site"](${bbox});
+            );
+            out body;
+        `;
+        
+        let url = "https://lz4.overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+
+        try {
+            let response = await fetch(url);
+            if (!response.ok) {
+                url = "https://overpass.kumi.systems/api/interpreter?data=" + encodeURIComponent(query);
+                response = await fetch(url);
+            }
+            
+            let data = await response.json();
+
+            data.elements.forEach(el => {
+                if (!el.tags) return;
+
+                // 1. Fietsknooppunten
+                let nodeNum = el.tags.rcn_ref || el.tags.rwn_ref || el.tags.ref || el.tags["expected_rcn_ref"];
+                
+                if (nodeNum) {
+                    let nodeKey = `${nodeNum}_${el.lat.toFixed(4)}_${el.lon.toFixed(4)}`;
+
+                    if (!loadedNodes[nodeKey]) {
+                        let isVisited = visitedSet.has(nodeKey) || visitedSet.has(nodeNum);
+
+                        let icon = L.divIcon({
+                            className: 'node-icon' + (isVisited ? ' visited' : ''),
+                            html: nodeNum,
+                            iconSize: [28, 28]
+                        });
+
+                        let marker = L.marker([el.lat, el.lon], { icon: icon }).addTo(map);
+
+                        marker.on('click', function() {
+                            if (visitedSet.has(nodeKey)) {
+                                visitedSet.delete(nodeKey);
+                                marker.getElement()?.classList.remove('visited');
+                            } else {
+                                visitedSet.add(nodeKey);
+                                marker.getElement()?.classList.add('visited');
+                            }
+                            saveState();
+                        });
+
+                        loadedNodes[nodeKey] = marker;
+                    }
+                }
+
+                // 2. Camperplaatsen
+                if (el.tags.tourism === 'caravan_site' || el.tags.tourism === 'camp_site') {
+                    let name = el.tags.name || 'Camperplaats / Camping';
+                    addCamperMarker(el.lat, el.lon, `<b>${name}</b><br>Bron: OpenStreetMap`);
+                }
+            });
+        } catch (err) {
+            console.log("Fout of overbelasting bij ophalen knooppunten:", err);
+        }
+    }
+
+    map.on('moveend', () => {
+        clearTimeout(loadTimeout);
+        loadTimeout = setTimeout(fetchDataForBounds, 300);
+    });
+
+    fetchDataForBounds();
+
+    // 🌟 GPX Upload Handler
+    document.getElementById('gpx-file').addEventListener('change', async function(e) {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        try {
+            let text = await file.text();
+            let foundNumbers = new Set();
+            let sumLat = 0, sumLon = 0, validCoordCount = 0;
+
+            let tagMatches = text.match(/<(name|cmt|desc|sym|type)>([^<]+)<\/(name|cmt|desc|sym|type)>/gi) || [];
+            tagMatches.forEach(tag => {
+                let cleanText = tag.replace(/<\/?[^>]+(>|$)/g, "").trim();
+                let numbers = cleanText.match(/\b\d{1,3}\b/g);
+                if (numbers) {
+                    numbers.forEach(num => foundNumbers.add(parseInt(num, 10).toString()));
+                }
+            });
+
+            let latMatches = text.match(/lat=["'](-?\d+\.\d+)["']/gi) || [];
+            let lonMatches = text.match(/lon=["'](-?\d+\.\d+)["']/gi) || [];
+            let limit = Math.min(latMatches.length, lonMatches.length);
+
+            for (let i = 0; i < limit; i++) {
+                let lat = parseFloat(latMatches[i].replace(/lat=["']/i, '').replace(/["']/, ''));
+                let lon = parseFloat(lonMatches[i].replace(/lon=["']/i, '').replace(/["']/, ''));
+
+                if (!isNaN(lat) && !isNaN(lon) && lat > 50 && lat < 55 && lon > 2 && lon < 8) {
+                    sumLat += lat;
+                    sumLon += lon;
+                    validCoordCount++;
+                }
+            }
+
+            let matchedList = Array.from(foundNumbers);
+
+            if (matchedList.length > 0) {
+                matchedList.forEach(num => visitedSet.add(num));
+                saveState();
+
+                if (validCoordCount > 0) {
+                    let avgLat = sumLat / validCoordCount;
+                    let avgLon = sumLon / validCoordCount;
+                    map.setView([avgLat, avgLon], 11);
+                }
+
+                setTimeout(async () => {
+                    await fetchDataForBounds();
+                }, 500);
+
+                alert('🎉 GPX Geladen!\n\n✅ ' + matchedList.length + ' knooppunten afgevinkt en opgeslagen!');
+            } else {
+                alert('⚠️ Geen knooppuntnummers herkend in dit bestand.');
+            }
+        } catch (err) {
+            alert('Fout bij verwerken: ' + err.message);
+        }
+    });
+</script>
+</body>
+</html>/ 🌐 Verbeterde Data Lader (pakt álle types knooppunten)
 async function fetchDataForBounds() {
     if (map.getZoom() < 9) return; 
 
