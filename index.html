@@ -8,6 +8,235 @@
     <style>
         body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1e293b; color: white; }
         #app { display: flex; flex-direction: column; height: 100vh; }
+        
+        header { background: #0f172a; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+        h1 { margin: 0; font-size: 1.1rem; color: #38bdf8; display: flex; align-items: center; gap: 6px; }
+
+        .upload-btn { background: #0284c7; color: white; padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; gap: 6px; }
+        #gpx-file { display: none; }
+
+        #map { flex: 1; width: 100%; }
+        
+        .stats-bar { background: #0f172a; padding: 12px; display: flex; justify-content: space-around; font-weight: bold; border-top: 1px solid #334155; }
+        .stat-item { text-align: center; }
+        .stat-val { color: #22c55e; font-size: 1.2rem; display: block; }
+        
+        /* Knooppunten Styling */
+        .node-icon { background: #0284c7; border: 2px solid white; color: white; font-weight: bold; border-radius: 50%; text-align: center; line-height: 28px; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
+        .node-icon.visited { background: #22c55e; color: white; border: 2px solid white; box-shadow: 0 0 14px rgba(34, 197, 94, 0.9); transform: scale(1.2); z-index: 9999 !important; }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <header>
+        <h1>🚴 Knoop & Camper</h1>
+        <label for="gpx-file" class="upload-btn">
+            📂 Upload GPX
+        </label>
+        <input type="file" id="gpx-file" />
+    </header>
+    
+    <div id="map"></div>
+
+    <div class="stats-bar">
+        <div class="stat-item">
+            <span id="visited-count" class="stat-val">0</span>
+            Knooppunten
+        </div>
+        <div class="stat-item">
+            <span id="camper-count" class="stat-val">0</span>
+            Camperplekken
+        </div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+    // 1. Initialiseer Kaart op Midden-Nederland
+    const map = L.map('map').setView([52.0907, 5.1214], 10);
+
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap & CARTO',
+        maxZoom: 19
+    }).addTo(map);
+
+    // 💾 OPSLAG: Unieke sleutels op basis van [Nummer_Lat_Lng]
+    let visitedNodesMap = JSON.parse(localStorage.getItem('visitedNodesMap') || '{}'); 
+    let camperSpots = JSON.parse(localStorage.getItem('camperSpots') || '[]');
+    let loadedMarkers = {};
+    let currentPolyline = null;
+
+    updateCounters();
+
+    // Herstel opslag
+    camperSpots.forEach(spot => {
+        L.marker([spot.lat, spot.lng], {
+            icon: L.divIcon({ html: '🚐', className: 'camper-pin', iconSize: [30, 30] })
+        }).addTo(map).bindPopup("<b>Camperplaats</b><br>Toegevoegd op " + spot.date);
+    });
+
+    function saveState() {
+        localStorage.setItem('visitedNodesMap', JSON.stringify(visitedNodesMap));
+        localStorage.setItem('camperSpots', JSON.stringify(camperSpots));
+        updateCounters();
+    }
+
+    function updateCounters() {
+        document.getElementById('visited-count').innerText = Object.keys(visitedNodesMap).length;
+        document.getElementById('camper-count').innerText = camperSpots.length;
+    }
+
+    // Camperplaats toevoegen via lang indrukken / rechtermuisknop
+    map.on('contextmenu', function(e) {
+        let dateStr = new Date().toLocaleDateString('nl-NL');
+        L.marker(e.latlng, {
+            icon: L.divIcon({ html: '🚐', className: 'camper-pin', iconSize: [30, 30] })
+        }).addTo(map).bindPopup("<b>Camperplaats</b><br>Toegevoegd op " + dateStr).openPopup();
+
+        camperSpots.push({ lat: e.latlng.lat, lng: e.latlng.lng, date: dateStr });
+        saveState();
+    });
+
+    // 🌐 Haal échte regionale knooppunten op via OpenStreetMap op basis van GPS locatie
+    async function fetchNodesForBounds() {
+        if (map.getZoom() < 10) return; 
+
+        let bounds = map.getBounds();
+        let bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+        let query = `[out:json][timeout:10];node["rcn_ref"](${bbox});out body;`;
+        let url = "https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+
+        try {
+            let response = await fetch(url);
+            let data = await response.json();
+
+            data.elements.forEach(el => {
+                let nodeNum = el.tags.rcn_ref;
+                // Unieke ID combineert getal met exacte coordinaten
+                let uniqueKey = `${nodeNum}_${el.lat.toFixed(3)}_${el.lon.toFixed(3)}`;
+
+                if (!loadedMarkers[uniqueKey]) {
+                    let isVisited = !!visitedNodesMap[uniqueKey];
+
+                    let icon = L.divIcon({
+                        className: 'node-icon' + (isVisited ? ' visited' : ''),
+                        html: nodeNum,
+                        iconSize: [28, 28]
+                    });
+
+                    let marker = L.marker([el.lat, el.lon], { icon: icon }).addTo(map);
+
+                    marker.on('click', function() {
+                        if (visitedNodesMap[uniqueKey]) {
+                            delete visitedNodesMap[uniqueKey];
+                            marker.getElement()?.classList.remove('visited');
+                        } else {
+                            visitedNodesMap[uniqueKey] = { id: nodeNum, lat: el.lat, lng: el.lon };
+                            marker.getElement()?.classList.add('visited');
+                        }
+                        saveState();
+                    });
+
+                    loadedMarkers[uniqueKey] = marker;
+                }
+            });
+        } catch (err) {
+            console.log("Knooppunten laden onderbroken:", err);
+        }
+    }
+
+    map.on('moveend', fetchNodesForBounds);
+    fetchNodesForBounds();
+
+    // Afstand berekenen in km
+    function getDistance(lat1, lon1, lat2, lon2) {
+        let R = 6371; 
+        let dLat = (lat2 - lat1) * Math.PI / 180;
+        let dLon = (lon2 - lon1) * Math.PI / 180;
+        let a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+        let c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c;
+    }
+
+    // 🌟 SLIMME GPX PARSER: Volgt de GPS-Route
+    document.getElementById('gpx-file').addEventListener('change', async function(e) {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        try {
+            let text = await file.text();
+            let parser = new DOMParser();
+            let xmlDoc = parser.parseFromString(text, "text/xml");
+            
+            let trackPoints = xmlDoc.querySelectorAll("trkpt, rtept");
+            let routeCoords = [];
+
+            trackPoints.forEach(pt => {
+                let lat = parseFloat(pt.getAttribute("lat"));
+                let lon = parseFloat(pt.getAttribute("lon"));
+                if (!isNaN(lat) && !isNaN(lon) && lat > 50 && lat < 55) {
+                    routeCoords.push([lat, lon]);
+                }
+            });
+
+            if (routeCoords.length > 0) {
+                // 1. Teken de gefietste route op de kaart
+                if (currentPolyline) map.removeLayer(currentPolyline);
+                
+                currentPolyline = L.polyline(routeCoords, {
+                    color: '#8b5cf6', // Opvallend Paars/Blauw
+                    weight: 6,
+                    opacity: 0.8
+                }).addTo(map);
+
+                // 2. Zoom direct strak in op de route (Oploo, Utrecht, etc.)
+                let bounds = currentPolyline.getBounds();
+                map.fitBounds(bounds, { padding: [40, 40] });
+
+                // 3. Haal de knooppunten van díe specifieke regio op
+                setTimeout(async () => {
+                    await fetchNodesForBounds();
+
+                    let matchedCount = 0;
+                    // Vink alle geladen knooppunten af die binnen 300 meter van jouw gefietste GPS-lijn liggen
+                    Object.entries(loadedMarkers).forEach(([key, marker]) => {
+                        let latLng = marker.getLatLng();
+                        let isClose = routeCoords.some(pt => getDistance(pt[0], pt[1], latLng.lat, latLng.lng) < 0.3);
+
+                        if (isClose) {
+                            visitedNodesMap[key] = { id: key.split('_')[0], lat: latLng.lat, lng: latLng.lng };
+                            marker.getElement()?.classList.add('visited');
+                            matchedCount++;
+                        }
+                    });
+
+                    saveState();
+                    alert('🎉 GPX Route Ingeladen!\n\n📍 Jouw GPS-spoor is op de kaart getekend.\n✅ ' + matchedCount + ' knooppunten op jóuw specifieke route zijn groen afgevinkt!');
+                }, 800);
+
+            } else {
+                alert('⚠️ Dit bestand bevat geen GPS-spoor (trackpoints). Exporteer in Fietsknoop als "Track/Spoor GPX".');
+            }
+        } catch (err) {
+            alert('Fout bij verwerken: ' + err.message);
+        }
+    });
+</script>
+</body>
+</html>!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knoop & Camper</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1e293b; color: white; }
+        #app { display: flex; flex-direction: column; height: 100vh; }
         header { background: #0f172a; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
         h1 { margin: 0; font-size: 1.1rem; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
         
