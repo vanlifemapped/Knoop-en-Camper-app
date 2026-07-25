@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knoop & Camper Prototype</title>
+    <!-- Leaflet Kaart CSS (Gratis Kaartbibliotheek) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0f172a; color: white; }
+        #app { display: flex; flex-direction: column; height: 100vh; }
+        header { background: #1e293b; padding: 15px; text-align: center; border-bottom: 1px solid #334155; }
+        h1 { margin: 0; font-size: 1.2rem; color: #38bdf8; }
+        #map { flex: 1; width: 100%; }
+        .stats-bar { background: #1e293b; padding: 12px; display: flex; justify-content: space-around; font-weight: bold; border-top: 1px solid #334155; }
+        .stat-item { text-align: center; }
+        .stat-val { color: #22c55e; font-size: 1.2rem; display: block; }
+        /* Custom Styling voor de Knooppunten op de kaart */
+        .node-icon { background: #38bdf8; border: 2px solid white; color: black; font-weight: bold; border-radius: 50%; text-align: center; line-height: 24px; font-size: 11px; box-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
+        .node-icon.visited { background: #22c55e; color: white; box-shadow: 0 0 10px rgba(34, 197, 94, 0.8); }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <header>
+        <h1>🚴 Knoop & Camper Dashboard</h1>
+    </header>
+    
+    <div id="map"></div>
+
+    <div class="stats-bar">
+        <div class="stat-item">
+            <span id="visited-count" class="stat-val">0</span>
+            Knooppunten
+        </div>
+        <div class="stat-item">
+            <span id="camper-count" class="stat-val">0</span>
+            Camperplekken
+        </div>
+    </div>
+</div>
+
+<!-- Leaflet JavaScript -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+    // 1. Initialiseer de kaart op Nederland
+    const map = L.map('map').setView([52.1326, 5.2913], 9);
+
+    // 2. Laad een mooie "Dark Mode" kaartstijl (Gratis te gebruiken van CartoDB)
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap & &copy; CARTO',
+        maxZoom: 19
+    }).addTo(map);
+
+    // Voorbeeld Data: Knooppunten (In de echte app halen we dit automatisch op)
+    let nodes = [
+        { id: "81", lat: 52.15, lng: 5.38, visited: false },
+        { id: "82", lat: 52.17, lng: 5.42, visited: false },
+        { id: "83", lat: 52.12, lng: 5.35, visited: false }
+    ];
+
+    let visitedCount = 0;
+    let camperCount = 0;
+
+    // 3. Teken de knooppunten op de kaart
+    nodes.forEach(node => {
+        let icon = L.divIcon({
+            className: 'node-icon',
+            html: node.id,
+            iconSize: [28, 28]
+        });
+
+        let marker = L.marker([node.lat, node.lng], { icon: icon }).addTo(map);
+        
+        // Klik functionaliteit: Vink knooppunt af!
+        marker.on('click', function() {
+            node.visited = !node.visited;
+            
+            if(node.visited) {
+                marker.getElement().classList.add('visited');
+                visitedCount++;
+            } else {
+                marker.getElement().classList.remove('visited');
+                visitedCount--;
+            }
+            
+            document.getElementById('visited-count').innerText = visitedCount;
+        });
+    });
+
+    // 4. Voorbeeld Camperplaats Toevoegen (Aanklikken op de kaart)
+    map.on('contextmenu', function(e) {
+        L.marker(e.latlng, {
+            icon: L.divIcon({
+                html: '🚐',
+                className: 'camper-pin',
+                iconSize: [30, 30]
+            })
+        }).addTo(map).bindPopup("<b>Camperplaats</b><br>Bezocht op " + new Date().toLocaleDateString('nl-NL')).openPopup();
+
+        camperCount++;
+        document.getElementById('camper-count').innerText = camperCount;
+    });
+</script>
+</body>
+</html>
