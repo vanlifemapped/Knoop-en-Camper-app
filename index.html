@@ -4,6 +4,214 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Knoop & Camper</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1e293b; color: white; }
+        #app { display: flex; flex-direction: column; height: 100vh; }
+        header { background: #0f172a; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+        h1 { margin: 0; font-size: 1.1rem; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
+        
+        .upload-btn { background: #0284c7; color: white; padding: 8px 14px; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; gap: 6px; }
+        .upload-btn:hover { background: #0369a1; }
+        #gpx-file { display: none; }
+
+        #map { flex: 1; width: 100%; }
+        
+        .stats-bar { background: #0f172a; padding: 12px; display: flex; justify-content: space-around; font-weight: bold; border-top: 1px solid #334155; }
+        .stat-item { text-align: center; }
+        .stat-val { color: #22c55e; font-size: 1.2rem; display: block; }
+        
+        /* Knooppunten Styling */
+        .node-icon { background: #0284c7; border: 2px solid white; color: white; font-weight: bold; border-radius: 50%; text-align: center; line-height: 26px; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
+        .node-icon.visited { background: #22c55e; color: white; border: 2px solid white; box-shadow: 0 0 12px rgba(34, 197, 94, 0.9); transform: scale(1.15); z-index: 9999 !important; }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <header>
+        <h1>🚴 Knoop & Camper</h1>
+        <label for="gpx-file" class="upload-btn">
+            📂 Upload GPX
+        </label>
+        <input type="file" id="gpx-file" />
+    </header>
+    
+    <div id="map"></div>
+
+    <div class="stats-bar">
+        <div class="stat-item">
+            <span id="visited-count" class="stat-val">0</span>
+            Knooppunten
+        </div>
+        <div class="stat-item">
+            <span id="camper-count" class="stat-val">0</span>
+            Camperplekken
+        </div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+    // 1. Initialiseer Kaart
+    const map = L.map('map').setView([51.95, 5.23], 12); // Standaard Culemborg
+
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap & CARTO',
+        maxZoom: 19
+    }).addTo(map);
+
+    // 💾 OPSLAG: Laad opgeslagen data bij het starten van de app
+    let visitedSet = new Set(JSON.parse(localStorage.getItem('visitedNodes') || '[]'));
+    let camperSpots = JSON.parse(localStorage.getItem('camperSpots') || '[]');
+    let loadedNodes = {}; 
+    let gpxMarkersGroup = L.layerGroup().addTo(map);
+
+    // Werk teller bij opstarten bij
+    document.getElementById('visited-count').innerText = visitedSet.size;
+    document.getElementById('camper-count').innerText = camperSpots.length;
+
+    // Herstel eerder opgeslagen camperplekken
+    camperSpots.forEach(spot => {
+        L.marker([spot.lat, spot.lng], {
+            icon: L.divIcon({ html: '🚐', className: 'camper-pin', iconSize: [30, 30] })
+        }).addTo(map).bindPopup("<b>Camperplaats</b><br>Toegevoegd op " + spot.date);
+    });
+
+    // Opslaan helper
+    function saveState() {
+        localStorage.setItem('visitedNodes', JSON.stringify(Array.from(visitedSet)));
+        localStorage.setItem('camperSpots', JSON.stringify(camperSpots));
+        document.getElementById('visited-count').innerText = visitedSet.size;
+        document.getElementById('camper-count').innerText = camperSpots.length;
+    }
+
+    // Camperplaats toevoegen via rechtermuisknop / lang indrukken
+    map.on('contextmenu', function(e) {
+        let dateStr = new Date().toLocaleDateString('nl-NL');
+        L.marker(e.latlng, {
+            icon: L.divIcon({ html: '🚐', className: 'camper-pin', iconSize: [30, 30] })
+        }).addTo(map).bindPopup("<b>Camperplaats</b><br>Toegevoegd op " + dateStr).openPopup();
+
+        camperSpots.push({ lat: e.latlng.lat, lng: e.latlng.lng, date: dateStr });
+        saveState();
+    });
+
+    // 🌐 Haal echte knooppunten op via OpenStreetMap
+    async function fetchNodesForBounds() {
+        if (map.getZoom() < 9) return; 
+
+        let bounds = map.getBounds();
+        let bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+        let query = `[out:json][timeout:10];node["rcn_ref"](${bbox});out body;`;
+        let url = "https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+
+        try {
+            let response = await fetch(url);
+            let data = await response.json();
+
+            data.elements.forEach(el => {
+                let nodeNum = el.tags.rcn_ref;
+                let key = `${nodeNum}_${el.lat.toFixed(4)}_${el.lon.toFixed(4)}`;
+
+                if (!loadedNodes[key]) {
+                    let isVisited = visitedSet.has(nodeNum);
+
+                    let icon = L.divIcon({
+                        className: 'node-icon' + (isVisited ? ' visited' : ''),
+                        html: nodeNum,
+                        iconSize: [28, 28]
+                    });
+
+                    let marker = L.marker([el.lat, el.lon], { icon: icon }).addTo(map);
+
+                    marker.on('click', function() {
+                        if (visitedSet.has(nodeNum)) {
+                            visitedSet.delete(nodeNum);
+                            marker.getElement()?.classList.remove('visited');
+                        } else {
+                            visitedSet.add(nodeNum);
+                            marker.getElement()?.classList.add('visited');
+                        }
+                        saveState();
+                    });
+
+                    loadedNodes[key] = marker;
+                }
+            });
+        } catch (err) {
+            console.log("Knooppunten laden onderbroken:", err);
+        }
+    }
+
+    map.on('moveend', fetchNodesForBounds);
+    fetchNodesForBounds();
+
+    // 🌟 GPX Parser met Directe Visuele Tekening & Geheugen!
+    document.getElementById('gpx-file').addEventListener('change', async function(e) {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        try {
+            let text = await file.text();
+            let parser = new DOMParser();
+            let xmlDoc = parser.parseFromString(text, "text/xml");
+            
+            let waypoints = xmlDoc.querySelectorAll("wpt");
+            let bounds = L.latLngBounds();
+            let foundCount = 0;
+
+            waypoints.forEach(wpt => {
+                let lat = parseFloat(wpt.getAttribute("lat"));
+                let lon = parseFloat(wpt.getAttribute("lon"));
+                let nameEl = wpt.querySelector("name");
+                let name = nameEl ? nameEl.textContent.trim() : "";
+
+                // Zoek het getal/knooppuntnummer
+                let numMatch = name.match(/\b\d{1,3}\b/);
+                if (numMatch && !isNaN(lat) && !isNaN(lon)) {
+                    let nodeNum = parseInt(numMatch[0], 10).toString();
+                    
+                    visitedSet.add(nodeNum);
+                    bounds.extend([lat, lon]);
+                    foundCount++;
+
+                    // Teken Meteen een Duidelijke Groene Marker op de Exacte GPS Plek!
+                    let icon = L.divIcon({
+                        className: 'node-icon visited',
+                        html: nodeNum,
+                        iconSize: [30, 30]
+                    });
+
+                    L.marker([lat, lon], { icon: icon })
+                        .addTo(gpxMarkersGroup)
+                        .bindPopup("<b>Knooppunt " + nodeNum + "</b><br>Bezocht via GPX");
+                }
+            });
+
+            if (foundCount > 0) {
+                saveState(); // Sla direct op in geheugen!
+
+                // Zoom de kaart strak in op de gefietste route!
+                map.fitBounds(bounds, { padding: [40, 40] });
+
+                alert('🎉 GPX Geladen!\n\n✅ ' + foundCount + ' knooppunten direct getekend op de kaart én opgeslagen op je telefoon!');
+            } else {
+                alert('⚠️ Geen Waypoints/knooppunten met coördinaten in dit bestand gevonden.');
+            }
+        } catch (err) {
+            alert('Fout bij verwerken: ' + err.message);
+        }
+    });
+</script>
+</body>
+</html>!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knoop & Camper</title>
     <!-- Leaflet Kaart CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
