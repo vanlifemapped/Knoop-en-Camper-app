@@ -8,6 +8,263 @@
     <style>
         body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1e293b; color: white; }
         #app { display: flex; flex-direction: column; height: 100vh; }
+        
+        header { background: #0f172a; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid #334155; }
+        .top-row { display: flex; justify-content: space-between; align-items: center; }
+        h1 { margin: 0; font-size: 1.1rem; color: #38bdf8; display: flex; align-items: center; gap: 6px; }
+        
+        .search-bar { display: flex; gap: 6px; }
+        .search-input { flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: white; font-size: 0.9rem; outline: none; }
+        .search-btn { background: #38bdf8; color: #0f172a; border: none; padding: 8px 12px; border-radius: 8px; font-weight: bold; cursor: pointer; }
+
+        .upload-btn { background: #0284c7; color: white; padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; gap: 6px; }
+        #gpx-file { display: none; }
+
+        #map { flex: 1; width: 100%; }
+        
+        .stats-bar { background: #0f172a; padding: 12px; display: flex; justify-content: space-around; font-weight: bold; border-top: 1px solid #334155; }
+        .stat-item { text-align: center; }
+        .stat-val { color: #22c55e; font-size: 1.2rem; display: block; }
+        
+        /* Knooppunten Styling */
+        .node-icon { background: #0284c7; border: 2px solid white; color: white; font-weight: bold; border-radius: 50%; text-align: center; line-height: 28px; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,0.4); }
+        .node-icon.visited { background: #22c55e; color: white; border: 2px solid white; box-shadow: 0 0 14px rgba(34, 197, 94, 0.9); transform: scale(1.15); z-index: 9999 !important; }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <header>
+        <div class="top-row">
+            <h1>🚴 Knoop & Camper</h1>
+            <label for="gpx-file" class="upload-btn">
+                📂 Upload GPX
+            </label>
+            <input type="file" id="gpx-file" />
+        </div>
+        <div class="search-bar">
+            <input type="text" id="search-input" class="search-input" placeholder="🔍 Zoek plaats (bijv. Oploo, Utrecht...)" />
+            <button class="search-btn" onclick="searchLocation()">Zoek</button>
+        </div>
+    </header>
+    
+    <div id="map"></div>
+
+    <div class="stats-bar">
+        <div class="stat-item">
+            <span id="visited-count" class="stat-val">0</span>
+            Knooppunten
+        </div>
+        <div class="stat-item">
+            <span id="camper-count" class="stat-val">0</span>
+            Camperplekken
+        </div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+    // 1. Initialiseer Kaart
+    const map = L.map('map').setView([51.5750, 5.8900], 12); // Standaard Oploo
+
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap & CARTO',
+        maxZoom: 19
+    }).addTo(map);
+
+    // 💾 Permanente Opslag
+    let visitedSet = new Set(JSON.parse(localStorage.getItem('visitedNodesSet') || '[]'));
+    let camperSpots = JSON.parse(localStorage.getItem('camperSpots') || '[]');
+    let loadedNodes = {};
+
+    updateCounters();
+
+    // Herstel Camperplekken uit geheugen
+    camperSpots.forEach(spot => {
+        L.marker([spot.lat, spot.lng], {
+            icon: L.divIcon({ html: '🚐', className: 'camper-pin', iconSize: [30, 30] })
+        }).addTo(map).bindPopup("<b>Camperplaats</b><br>Toegevoegd op " + spot.date);
+    });
+
+    function saveState() {
+        localStorage.setItem('visitedNodesSet', JSON.stringify(Array.from(visitedSet)));
+        localStorage.setItem('camperSpots', JSON.stringify(camperSpots));
+        updateCounters();
+    }
+
+    function updateCounters() {
+        document.getElementById('visited-count').innerText = visitedSet.size;
+        document.getElementById('camper-count').innerText = camperSpots.length;
+    }
+
+    // Camperplaats toevoegen via lang indrukken / rechtermuisknop
+    map.on('contextmenu', function(e) {
+        let dateStr = new Date().toLocaleDateString('nl-NL');
+        L.marker(e.latlng, {
+            icon: L.divIcon({ html: '🚐', className: 'camper-pin', iconSize: [30, 30] })
+        }).addTo(map).bindPopup("<b>Camperplaats</b><br>Toegevoegd op " + dateStr).openPopup();
+
+        camperSpots.push({ lat: e.latlng.lat, lng: e.latlng.lng, date: dateStr });
+        saveState();
+    });
+
+    // 🔍 Plaatsnaam Zoekfunctie
+    async function searchLocation() {
+        let query = document.getElementById('search-input').value.trim();
+        if (!query) return;
+
+        try {
+            let res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`);
+            let data = await res.json();
+            if (data.length > 0) {
+                let lat = parseFloat(data[0].lat);
+                let lon = parseFloat(data[0].lon);
+                map.setView([lat, lon], 13);
+            } else {
+                alert('Plaatsnaam niet gevonden.');
+            }
+        } catch(e) {
+            alert('Fout bij zoeken: ' + e.message);
+        }
+    }
+
+    document.getElementById('search-input').addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') searchLocation();
+    });
+
+    // 🌐 Haal knooppunten op via OpenStreetMap API
+    async function fetchNodesForBounds() {
+        if (map.getZoom() < 10) return; 
+
+        let bounds = map.getBounds();
+        let bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+        let query = `[out:json][timeout:15];node["rcn_ref"](${bbox});out body;`;
+        let url = "https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+
+        try {
+            let response = await fetch(url);
+            if (!response.ok) return;
+            let data = await response.json();
+
+            data.elements.forEach(el => {
+                let nodeNum = el.tags.rcn_ref;
+                let key = `${nodeNum}_${el.lat.toFixed(4)}_${el.lon.toFixed(4)}`;
+
+                if (!loadedNodes[key]) {
+                    let isVisited = visitedSet.has(nodeNum);
+
+                    let icon = L.divIcon({
+                        className: 'node-icon' + (isVisited ? ' visited' : ''),
+                        html: nodeNum,
+                        iconSize: [28, 28]
+                    });
+
+                    let marker = L.marker([el.lat, el.lon], { icon: icon }).addTo(map);
+
+                    marker.on('click', function() {
+                        if (visitedSet.has(nodeNum)) {
+                            visitedSet.delete(nodeNum);
+                            marker.getElement()?.classList.remove('visited');
+                        } else {
+                            visitedSet.add(nodeNum);
+                            marker.getElement()?.classList.add('visited');
+                        }
+                        saveState();
+                    });
+
+                    loadedNodes[key] = marker;
+                }
+            });
+        } catch (err) {
+            console.log("Netwerkrespons vertraagd of onderbroken.");
+        }
+    }
+
+    map.on('moveend', fetchNodesForBounds);
+    fetchNodesForBounds();
+
+    // 🌟 GPX Parser
+    document.getElementById('gpx-file').addEventListener('change', async function(e) {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        try {
+            let text = await file.text();
+            let foundNumbers = new Set();
+            let sumLat = 0, sumLon = 0, validCoordCount = 0;
+
+            // 1. Zoek naar knooppuntnummers in de tekst
+            let tagMatches = text.match(/<(name|cmt|desc|sym|type)>([^<]+)<\/(name|cmt|desc|sym|type)>/gi) || [];
+            tagMatches.forEach(tag => {
+                let cleanText = tag.replace(/<\/?[^>]+(>|$)/g, "").trim();
+                let numbers = cleanText.match(/\b\d{1,3}\b/g);
+                if (numbers) {
+                    numbers.forEach(num => foundNumbers.add(parseInt(num, 10).toString()));
+                }
+            });
+
+            // 2. Zoek naar eventuele GPS-coördinaten in het bestand
+            let latMatches = text.match(/lat=["'](-?\d+\.\d+)["']/gi) || [];
+            let lonMatches = text.match(/lon=["'](-?\d+\.\d+)["']/gi) || [];
+            let limit = Math.min(latMatches.length, lonMatches.length);
+
+            for (let i = 0; i < limit; i++) {
+                let lat = parseFloat(latMatches[i].replace(/lat=["']/i, '').replace(/["']/, ''));
+                let lon = parseFloat(lonMatches[i].replace(/lon=["']/i, '').replace(/["']/, ''));
+
+                if (!isNaN(lat) && !isNaN(lon) && lat > 50 && lat < 55 && lon > 2 && lon < 8) {
+                    sumLat += lat;
+                    sumLon += lon;
+                    validCoordCount++;
+                }
+            }
+
+            let matchedList = Array.from(foundNumbers);
+
+            if (matchedList.length > 0) {
+                matchedList.forEach(num => visitedSet.add(num));
+                saveState();
+
+                // Zoom in op de gemiddelde GPS-locatie uit het bestand (indien aanwezig)
+                if (validCoordCount > 0) {
+                    let avgLat = sumLat / validCoordCount;
+                    let avgLon = sumLon / validCoordCount;
+                    map.setView([avgLat, avgLon], 13);
+                }
+
+                // Werk de zichtbare knooppunten op de kaart bij
+                setTimeout(async () => {
+                    await fetchNodesForBounds();
+
+                    Object.entries(loadedNodes).forEach(([key, marker]) => {
+                        let nodeNum = key.split('_')[0];
+                        if (visitedSet.has(nodeNum)) {
+                            marker.getElement()?.classList.add('visited');
+                        }
+                    });
+                }, 500);
+
+                alert('🎉 Gelukt!\n\n✅ ' + matchedList.length + ' knooppunten afgevinkt en opgeslagen op je telefoon.');
+            } else {
+                alert('⚠️ Geen knooppuntnummers herkend in dit bestand.');
+            }
+        } catch (err) {
+            alert('Fout bij verwerken: ' + err.message);
+        }
+    });
+</script>
+</body>
+</html>!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knoop & Camper</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1e293b; color: white; }
+        #app { display: flex; flex-direction: column; height: 100vh; }
         header { background: #0f172a; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
         h1 { margin: 0; font-size: 1.1rem; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
         
