@@ -22,6 +22,207 @@
         .stat-item { text-align: center; }
         .stat-val { color: #22c55e; font-size: 1.2rem; display: block; }
         
+        /* Knooppunt Bolletjes */
+        .node-icon { background: #38bdf8; border: 2px solid white; color: black; font-weight: bold; border-radius: 50%; text-align: center; line-height: 24px; font-size: 11px; box-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
+        .node-icon.visited { background: #22c55e; color: white; box-shadow: 0 0 12px rgba(34, 197, 94, 0.9); }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <header>
+        <h1>🚴 Knoop & Camper</h1>
+        <label for="gpx-file" class="upload-btn">
+            📂 Upload GPX
+        </label>
+        <input type="file" id="gpx-file" />
+    </header>
+    
+    <div id="map"></div>
+
+    <div class="stats-bar">
+        <div class="stat-item">
+            <span id="visited-count" class="stat-val">0</span>
+            Knooppunten
+        </div>
+        <div class="stat-item">
+            <span id="camper-count" class="stat-val">0</span>
+            Camperplekken
+        </div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+    // 1. Initialiseer de kaart op Nederland
+    const map = L.map('map').setView([52.1326, 5.2913], 11);
+
+    // 2. Dark Mode Kaartstijl
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap & CARTO',
+        maxZoom: 19
+    }).addTo(map);
+
+    let loadedNodes = {}; // Cache voor geladen knooppunten { "id_lat_lng": nodeObject }
+    let visitedSet = new Set(); // Bijhouden van bezochte knooppunten
+    let camperCount = 0;
+
+    // Camperplaatsen toevoegen via lang indrukken / rechtermuisknop
+    map.on('contextmenu', function(e) {
+        L.marker(e.latlng, {
+            icon: L.divIcon({
+                html: '🚐',
+                className: 'camper-pin',
+                iconSize: [30, 30]
+            })
+        }).addTo(map).bindPopup("<b>Camperplaats</b><br>Toegevoegd op " + new Date().toLocaleDateString('nl-NL')).openPopup();
+
+        camperCount++;
+        document.getElementById('camper-count').innerText = camperCount;
+    });
+
+    // 🌐 Haal echte knooppunten op via OpenStreetMap (Overpass API)
+    async function fetchNodesForBounds() {
+        if (map.getZoom() < 10) return; // Alleen lokaal laden bij voldoende inzoomen
+
+        let bounds = map.getBounds();
+        let bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+        
+        let query = `[out:json][timeout:10];node["rcn_ref"](${bbox});out body;`;
+        let url = "https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+
+        try {
+            let response = await fetch(url);
+            let data = await response.json();
+
+            data.elements.forEach(el => {
+                let nodeNum = el.tags.rcn_ref;
+                let key = `${nodeNum}_${el.lat.toFixed(4)}_${el.lon.toFixed(4)}`;
+
+                if (!loadedNodes[key]) {
+                    let isVisited = visitedSet.has(nodeNum);
+
+                    let icon = L.divIcon({
+                        className: 'node-icon' + (isVisited ? ' visited' : ''),
+                        html: nodeNum,
+                        iconSize: [26, 26]
+                    });
+
+                    let marker = L.marker([el.lat, el.lon], { icon: icon }).addTo(map);
+
+                    let nodeObj = {
+                        id: nodeNum,
+                        lat: el.lat,
+                        lng: el.lon,
+                        marker: marker,
+                        visited: isVisited
+                    };
+
+                    marker.on('click', function() {
+                        toggleNodeState(nodeObj);
+                    });
+
+                    loadedNodes[key] = nodeObj;
+                }
+            });
+        } catch (err) {
+            console.log("Knooppunten laden onderbroken:", err);
+        }
+    }
+
+    function toggleNodeState(nodeObj) {
+        nodeObj.visited = !nodeObj.visited;
+        
+        let el = nodeObj.marker.getElement();
+        if (nodeObj.visited) {
+            visitedSet.add(nodeObj.id);
+            if (el) el.classList.add('visited');
+        } else {
+            visitedSet.delete(nodeObj.id);
+            if (el) el.classList.remove('visited');
+        }
+
+        document.getElementById('visited-count').innerText = visitedSet.size;
+    }
+
+    // Luister naar kaartverplaatsingen
+    map.on('moveend', fetchNodesForBounds);
+    fetchNodesForBounds(); // Eerste keer laden
+
+    // 🌟 GPX Lezen & Matchen met de Echte Knooppunten
+    document.getElementById('gpx-file').addEventListener('change', async function(e) {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        try {
+            let text = await file.text();
+            let foundNumbers = new Set();
+
+            // Zoek naar alle knooppuntnummers in het GPX bestand
+            let tagMatches = text.match(/<(name|cmt|desc|sym|type)>([^<]+)<\/(name|cmt|desc|sym|type)>/gi) || [];
+            
+            tagMatches.forEach(tag => {
+                let cleanText = tag.replace(/<\/?[^>]+(>|$)/g, "").trim();
+                let numbers = cleanText.match(/\b\d{1,3}\b/g);
+                if (numbers) {
+                    numbers.forEach(num => {
+                        foundNumbers.add(parseInt(num, 10).toString());
+                    });
+                }
+            });
+
+            let matchedList = Array.from(foundNumbers);
+
+            if (matchedList.length > 0) {
+                // Voeg toe aan bezochte verzameling
+                matchedList.forEach(num => visitedSet.add(num));
+
+                // Update alle al zichtbare knooppunten op de kaart
+                Object.values(loadedNodes).forEach(nodeObj => {
+                    if (visitedSet.has(nodeObj.id)) {
+                        nodeObj.visited = true;
+                        let el = nodeObj.marker.getElement();
+                        if (el) el.classList.add('visited');
+                    }
+                });
+
+                document.getElementById('visited-count').innerText = visitedSet.size;
+
+                alert('🎉 GPX Succesvol Geladen!\n\n📍 Herkende knooppunten: ' + matchedList.join(', ') + '\n\nZoom in op de regio van je rit om de groene knooppunten te bekijken!');
+            } else {
+                alert('⚠️ Geen knooppuntnummers gevonden in dit bestand.');
+            }
+        } catch (err) {
+            alert('Fout bij verwerken: ' + err.message);
+        }
+    });
+</script>
+</body>
+</html>!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knoop & Camper</title>
+    <!-- Leaflet Kaart CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: white; }
+        #app { display: flex; flex-direction: column; height: 100vh; }
+        header { background: #1e293b; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+        h1 { margin: 0; font-size: 1.1rem; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
+        
+        .upload-btn { background: #0284c7; color: white; padding: 8px 14px; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; gap: 6px; }
+        .upload-btn:hover { background: #0369a1; }
+        #gpx-file { display: none; }
+
+        #map { flex: 1; width: 100%; }
+        
+        .stats-bar { background: #1e293b; padding: 12px; display: flex; justify-content: space-around; font-weight: bold; border-top: 1px solid #334155; }
+        .stat-item { text-align: center; }
+        .stat-val { color: #22c55e; font-size: 1.2rem; display: block; }
+        
         .node-icon { background: #38bdf8; border: 2px solid white; color: black; font-weight: bold; border-radius: 50%; text-align: center; line-height: 24px; font-size: 11px; box-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
         .node-icon.visited { background: #22c55e; color: white; box-shadow: 0 0 12px rgba(34, 197, 94, 0.9); }
     </style>
