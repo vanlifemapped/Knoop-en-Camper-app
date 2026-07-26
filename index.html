@@ -14,6 +14,321 @@
         h1 { margin: 0; font-size: 1.1rem; color: #38bdf8; display: flex; align-items: center; gap: 6px; }
         
         .header-btns { display: flex; gap: 6px; }
+        .upload-btn { background: #0284c7; color: white; padding: 8px 10px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border: none; }
+        .reset-btn { background: #ef4444; color: white; padding: 8px 10px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border: none; }
+        #gpx-file { display: none; }
+
+        .search-bar { display: flex; gap: 6px; }
+        .search-input { flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; font-size: 0.9rem; outline: none; }
+        .search-btn { background: #38bdf8; color: #0f172a; border: none; padding: 8px 12px; border-radius: 8px; font-weight: bold; cursor: pointer; }
+
+        #map { flex: 1; width: 100%; }
+        
+        .stats-bar { background: #1e293b; padding: 12px; display: flex; justify-content: space-around; font-weight: bold; border-top: 1px solid #334155; }
+        .stat-item { text-align: center; }
+        .stat-val { color: #22c55e; font-size: 1.2rem; display: block; }
+        
+        /* 🎨 CRASHOFVRIJE MARKER STYLING (GEEN FLEXBOX MEER!) */
+        .node-icon { 
+            background-color: #0284c7 !important; /* BLAUW = OMVANG / NIET AFGEVINKT */
+            border: 2px solid #ffffff !important; 
+            color: #ffffff !important; 
+            font-weight: bold !important; 
+            border-radius: 50% !important; 
+            text-align: center !important; 
+            line-height: 24px !important; 
+            font-size: 11px !important; 
+            box-shadow: 0 2px 6px rgba(0,0,0,0.5) !important; 
+            cursor: pointer !important;
+            box-sizing: border-box !important;
+        }
+        .node-icon.visited { 
+            background-color: #22c55e !important; /* GROEN = AFGEVINKT */
+            box-shadow: 0 0 12px rgba(34, 197, 94, 1) !important; 
+            z-index: 99999 !important;
+        }
+        
+        .camper-pin { font-size: 22px; text-align: center; line-height: 30px; filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.5)); }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <header>
+        <div class="top-row">
+            <h1>🚴 Knoop & Camper</h1>
+            <div class="header-btns">
+                <button class="reset-btn" onclick="hardReset()">🗑️ Reset</button>
+                <label for="gpx-file" class="upload-btn">📂 Upload GPX</label>
+                <input type="file" id="gpx-file" accept=".gpx" />
+            </div>
+        </div>
+        <div class="search-bar">
+            <input type="text" id="search-input" class="search-input" placeholder="🔍 Zoek plaats (bijv. Culemborg...)" />
+            <button class="search-btn" onclick="searchLocation()">Zoek</button>
+        </div>
+    </header>
+    
+    <div id="map"></div>
+
+    <div class="stats-bar">
+        <div class="stat-item">
+            <span id="visited-count" class="stat-val">0</span>
+            Afgevinkt
+        </div>
+        <div class="stat-item">
+            <span id="camper-count" class="stat-val">0</span>
+            Camperplekken
+        </div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+    // 1. Initialiseer Kaart op Culemborg
+    const map = L.map('map').setView([51.955, 5.320], 12);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 19
+    }).addTo(map);
+
+    let visitedSet = new Set(JSON.parse(localStorage.getItem('visitedSet_v5') || '[]'));
+    let customCampers = JSON.parse(localStorage.getItem('customCampers_v5') || '[]');
+
+    let nodesLayerGroup = L.layerGroup().addTo(map);
+    let trackLayerGroup = L.layerGroup().addTo(map);
+
+    let loadedNodes = {};
+    let loadedCampers = {};
+    let loadDebounce = null;
+
+    updateStats();
+
+    function hardReset() {
+        if (confirm("Wil je alle opgeslagen knooppunten en routes wissen?")) {
+            localStorage.clear();
+            visitedSet.clear();
+            customCampers = [];
+            loadedNodes = {};
+            loadedCampers = {};
+            nodesLayerGroup.clearLayers();
+            trackLayerGroup.clearLayers();
+            updateStats();
+            location.reload();
+        }
+    }
+
+    function saveState() {
+        localStorage.setItem('visitedSet_v5', JSON.stringify(Array.from(visitedSet)));
+        localStorage.setItem('customCampers_v5', JSON.stringify(customCampers));
+        updateStats();
+    }
+
+    function updateStats() {
+        document.getElementById('visited-count').innerText = visitedSet.size;
+        let totalCampers = Object.keys(loadedCampers).length + customCampers.length;
+        document.getElementById('camper-count').innerText = totalCampers;
+    }
+
+    // Veilige maker van knooppunt-markers (Met vaste explicit ankers)
+    function createNodeMarker(lat, lng, numStr) {
+        let key = `${numStr}_${lat.toFixed(4)}_${lng.toFixed(4)}`;
+        if (loadedNodes[key]) return;
+
+        let isVisited = visitedSet.has(key) || visitedSet.has(numStr);
+
+        let icon = L.divIcon({
+            className: 'node-icon' + (isVisited ? ' visited' : ''),
+            html: numStr,
+            iconSize: L.point(28, 28),
+            iconAnchor: L.point(14, 14)
+        });
+
+        let marker = L.marker([lat, lng], { icon: icon });
+
+        marker.on('click', () => {
+            let el = marker.getElement();
+            let currentlyVisited = visitedSet.has(key) || visitedSet.has(numStr);
+
+            if (currentlyVisited) {
+                visitedSet.delete(key);
+                visitedSet.delete(numStr);
+                if (el) el.classList.remove('visited');
+            } else {
+                visitedSet.add(key);
+                visitedSet.add(numStr);
+                if (el) el.classList.add('visited');
+            }
+            saveState();
+        });
+
+        nodesLayerGroup.addLayer(marker);
+        loadedNodes[key] = marker;
+    }
+
+    // Haal live ALLE knooppunten uit de omgeving op (OpenStreetMap)
+    async function fetchRegionData() {
+        if (map.getZoom() < 10) return;
+
+        let bounds = map.getBounds();
+        let bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+        
+        let query = `
+            [out:json][timeout:15];
+            (
+              node["rcn_ref"](${bbox});
+              node["rwn_ref"](${bbox});
+              node["tourism"="caravan_site"](${bbox});
+              node["tourism"="camp_site"](${bbox});
+            );
+            out body;
+        `;
+        
+        try {
+            let url = "https://lz4.overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+            let res = await fetch(url);
+            if (!res.ok) {
+                url = "https://overpass.kumi.systems/api/interpreter?data=" + encodeURIComponent(query);
+                res = await fetch(url);
+            }
+            let data = await res.json();
+
+            data.elements.forEach(el => {
+                if (!el.tags) return;
+
+                // 1. Knooppunten
+                let nodeNum = el.tags.rcn_ref || el.tags.rwn_ref || el.tags.ref;
+                if (nodeNum) {
+                    let numStr = parseInt(nodeNum, 10).toString();
+                    createNodeMarker(el.lat, el.lon, numStr);
+                }
+
+                // 2. Camperplaatsen
+                if (el.tags.tourism === 'caravan_site' || el.tags.tourism === 'camp_site') {
+                    let name = el.tags.name || (el.tags.tourism === 'caravan_site' ? 'Camperplaats' : 'Camping');
+                    addCamperMarker(el.lat, el.lon, `<b>${name}</b><br>Bron: OpenStreetMap`);
+                }
+            });
+        } catch (err) {
+            console.log("Fout bij ophalen regio-data:", err);
+        }
+    }
+
+    map.on('moveend', () => {
+        clearTimeout(loadDebounce);
+        loadDebounce = setTimeout(fetchRegionData, 400);
+    });
+
+    fetchRegionData();
+
+    // Camperplaatsen
+    function addCamperMarker(lat, lng, popupText, isCustom = false) {
+        let key = `${lat.toFixed(4)}_${lng.toFixed(4)}`;
+        if (loadedCampers[key]) return;
+
+        let camperIcon = L.divIcon({ 
+            html: '🚐', 
+            className: 'camper-pin', 
+            iconSize: L.point(30, 30),
+            iconAnchor: L.point(15, 15)
+        });
+
+        let marker = L.marker([lat, lng], { icon: camperIcon }).addTo(map).bindPopup(popupText);
+        if (!isCustom) loadedCampers[key] = marker;
+        updateStats();
+    }
+
+    map.on('contextmenu', (e) => {
+        let d = new Date().toLocaleDateString('nl-NL');
+        addCamperMarker(e.latlng.lat, e.latlng.lng, "<b>Eigen Camperplaats</b><br>Toegevoegd op " + d, true);
+        customCampers.push({ lat: e.latlng.lat, lng: e.latlng.lng, date: d });
+        saveState();
+    });
+
+    // Zoekfunctie
+    async function searchLocation() {
+        let q = document.getElementById('search-input').value.trim();
+        if (!q) return;
+        try {
+            let r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q + ' Nederland')}`);
+            let d = await r.json();
+            if (d.length > 0) map.setView([parseFloat(d[0].lat), parseFloat(d[0].lon)], 12);
+        } catch(e) {}
+    }
+    document.getElementById('search-input').addEventListener('keypress', (e) => { if (e.key === 'Enter') searchLocation(); });
+
+    // 🌟 GPX PARSER VOOR FIETSNETWERK
+    document.getElementById('gpx-file').addEventListener('change', async function(e) {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        try {
+            let text = await file.text();
+            let trackPoints = [];
+
+            trackLayerGroup.clearLayers();
+
+            let wptRegex = /<wpt\s+lat=["'](-?\d+\.\d+)["']\s+lon=["'](-?\d+\.\d+)["'][^>]*>([\s\S]*?)<\/wpt>/gi;
+            let match;
+
+            while ((match = wptRegex.exec(text)) !== null) {
+                let lat = parseFloat(match[1]);
+                let lon = parseFloat(match[2]);
+                let content = match[3];
+
+                let nameMatch = content.match(/<name>([^<]+)<\/name>/i);
+                let nameText = nameMatch ? nameMatch[1] : "";
+
+                let numMatch = nameText.match(/\d+/);
+                if (numMatch && !isNaN(lat) && !isNaN(lon)) {
+                    let numStr = parseInt(numMatch[0], 10).toString();
+                    let key = `${numStr}_${lat.toFixed(4)}_${lon.toFixed(4)}`;
+
+                    visitedSet.add(key);
+                    visitedSet.add(numStr);
+
+                    createNodeMarker(lat, lon, numStr);
+                    trackPoints.push([lat, lon]);
+                }
+            }
+
+            saveState();
+
+            if (trackPoints.length > 0) {
+                let line = L.polyline(trackPoints, { color: '#38bdf8', weight: 4, opacity: 0.85 });
+                trackLayerGroup.addLayer(line);
+
+                let bounds = L.latLngBounds(trackPoints);
+                if (bounds.isValid()) {
+                    map.fitBounds(bounds, { padding: [30, 30] });
+                }
+            } else {
+                alert("⚠️ Geen knooppunten herkend in dit GPX bestand.");
+            }
+        } catch (err) {
+            alert("Fout bij verwerken bestand: " + err.message);
+        }
+    });
+</script>
+</body>
+</html>!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knoop & Camper</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: white; }
+        #app { display: flex; flex-direction: column; height: 100vh; }
+        
+        header { background: #1e293b; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid #334155; }
+        .top-row { display: flex; justify-content: space-between; align-items: center; }
+        h1 { margin: 0; font-size: 1.1rem; color: #38bdf8; display: flex; align-items: center; gap: 6px; }
+        
+        .header-btns { display: flex; gap: 6px; }
         .upload-btn { background: #0284c7; color: white; padding: 8px 10px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; }
         .reset-btn { background: #ef4444; color: white; padding: 8px 10px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border: none; }
         #gpx-file { display: none; }
