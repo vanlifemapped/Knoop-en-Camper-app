@@ -1,4 +1,236 @@
-<!DOCTYPE html>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+    // 1. Kaart Initialisatie
+    const map = L.map('map').setView([51.5750, 5.8900], 11);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 19
+    }).addTo(map);
+
+    // 💾 Permanente Opslag
+    let visitedSet = new Set(JSON.parse(localStorage.getItem('visitedNodesSet') || '[]'));
+    let customCamperSpots = JSON.parse(localStorage.getItem('customCamperSpots') || '[]');
+    
+    let loadedNodes = {};
+    let loadedCampers = {};
+    let loadTimeout = null;
+    let currentGpxTrack = null;
+
+    updateCounters();
+
+    // Custom Camperplekken inladen uit geheugen
+    customCamperSpots.forEach(spot => {
+        addCamperMarker(spot.lat, spot.lng, "<b>Eigen Camperplaats</b><br>Toegevoegd op " + spot.date, true);
+    });
+
+    function saveState() {
+        localStorage.setItem('visitedNodesSet', JSON.stringify(Array.from(visitedSet)));
+        localStorage.setItem('customCamperSpots', JSON.stringify(customCamperSpots));
+        updateCounters();
+    }
+
+    function updateCounters() {
+        document.getElementById('visited-count').innerText = visitedSet.size;
+        let totalCampers = Object.keys(loadedCampers).length + customCamperSpots.length;
+        document.getElementById('camper-count').innerText = totalCampers;
+    }
+
+    // Camperplaats toevoegen via Rechtermuisknop / Lang indrukken
+    map.on('contextmenu', function(e) {
+        let dateStr = new Date().toLocaleDateString('nl-NL');
+        addCamperMarker(e.latlng.lat, e.latlng.lng, "<b>Eigen Camperplaats</b><br>Toegevoegd op " + dateStr, true);
+        customCamperSpots.push({ lat: e.latlng.lat, lng: e.latlng.lng, date: dateStr });
+        saveState();
+    });
+
+    function addCamperMarker(lat, lng, popupText, isCustom = false) {
+        let key = `${lat.toFixed(4)}_${lng.toFixed(4)}`;
+        if (loadedCampers[key]) return;
+
+        let marker = L.marker([lat, lng], {
+            icon: L.divIcon({ html: '🚐', className: 'camper-pin', iconSize: [30, 30] })
+        }).addTo(map).bindPopup(popupText);
+
+        if (!isCustom) {
+            loadedCampers[key] = marker;
+        }
+        updateCounters();
+    }
+
+    // 🔍 Zoekfunctie
+    async function searchLocation() {
+        let query = document.getElementById('search-input').value.trim();
+        if (!query) return;
+
+        let cleanQuery = query.replace(/\d+/g, '').trim(); 
+        if (!cleanQuery) cleanQuery = query;
+
+        try {
+            let res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanQuery + ' Nederland')}`);
+            let data = await res.json();
+            if (data.length > 0) {
+                map.setView([parseFloat(data[0].lat), parseFloat(data[0].lon)], 12);
+            } else {
+                alert('Plaatsnaam niet gevonden.');
+            }
+        } catch(e) {
+            alert('Fout bij zoeken: ' + e.message);
+        }
+    }
+
+    document.getElementById('search-input').addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') searchLocation();
+    });
+
+    // 🌐 Data Lader (Fietsknooppunten + Camperplaatsen)
+    async function fetchDataForBounds() {
+        if (map.getZoom() < 10) return; // Knooppunten tonen vanaf zoomniveau 10
+
+        let bounds = map.getBounds();
+        let bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+        
+        let query = `
+            [out:json][timeout:25];
+            (
+              node["rcn_ref"](${bbox});
+              node["rwn_ref"](${bbox});
+              node["tourism"="caravan_site"](${bbox});
+              node["tourism"="camp_site"](${bbox});
+            );
+            out body;
+        `;
+        
+        let url = "https://lz4.overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+
+        try {
+            let response = await fetch(url);
+            if (!response.ok) {
+                url = "https://overpass.kumi.systems/api/interpreter?data=" + encodeURIComponent(query);
+                response = await fetch(url);
+            }
+            
+            let data = await response.json();
+
+            data.elements.forEach(el => {
+                if (!el.tags) return;
+
+                // 1. Fietsknooppunten
+                let nodeNum = el.tags.rcn_ref || el.tags.rwn_ref || el.tags.ref;
+                
+                if (nodeNum) {
+                    let nodeKey = `${nodeNum}_${el.lat.toFixed(4)}_${el.lon.toFixed(4)}`;
+
+                    if (!loadedNodes[nodeKey]) {
+                        // Check of het knooppunt afgevinkt is (via unieke key óf plat nummer)
+                        let isVisited = visitedSet.has(nodeKey) || visitedSet.has(nodeNum.toString());
+
+                        let icon = L.divIcon({
+                            className: 'node-icon' + (isVisited ? ' visited' : ''),
+                            html: nodeNum,
+                            iconSize: [28, 28]
+                        });
+
+                        let marker = L.marker([el.lat, el.lon], { icon: icon }).addTo(map);
+
+                        marker.on('click', function() {
+                            let currentlyVisited = visitedSet.has(nodeKey) || visitedSet.has(nodeNum.toString());
+
+                            if (currentlyVisited) {
+                                visitedSet.delete(nodeKey);
+                                visitedSet.delete(nodeNum.toString());
+                                marker.getElement()?.classList.remove('visited');
+                            } else {
+                                visitedSet.add(nodeKey);
+                                marker.getElement()?.classList.add('visited');
+                            }
+                            saveState();
+                        });
+
+                        loadedNodes[nodeKey] = marker;
+                    }
+                }
+
+                // 2. Camperplaatsen
+                if (el.tags.tourism === 'caravan_site' || el.tags.tourism === 'camp_site') {
+                    let name = el.tags.name || 'Camperplaats / Camping';
+                    let type = el.tags.tourism === 'caravan_site' ? 'Camperplaats' : 'Camping';
+                    addCamperMarker(el.lat, el.lon, `<b>${name}</b><br>Type: ${type}<br>Bron: OpenStreetMap`);
+                }
+            });
+        } catch (err) {
+            console.log("Fout bij ophalen Overpass data:", err);
+        }
+    }
+
+    map.on('moveend', () => {
+        clearTimeout(loadTimeout);
+        loadTimeout = setTimeout(fetchDataForBounds, 300);
+    });
+
+    fetchDataForBounds();
+
+    // 🌟 GPX Upload Handler
+    document.getElementById('gpx-file').addEventListener('change', async function(e) {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        try {
+            let text = await file.text();
+            let foundNumbers = new Set();
+            let trackPoints = [];
+
+            // Parse knooppuntnummers uit GPX XML tags
+            let tagMatches = text.match(/<(name|cmt|desc|sym|type)>([^<]+)<\/(name|cmt|desc|sym|type)>/gi) || [];
+            tagMatches.forEach(tag => {
+                let cleanText = tag.replace(/<\/?[^>]+(>|$)/g, "").trim();
+                let numbers = cleanText.match(/\b\d{1,3}\b/g);
+                if (numbers) {
+                    numbers.forEach(num => foundNumbers.add(parseInt(num, 10).toString()));
+                }
+            });
+
+            // Parse GPS coördinaten voor route
+            let latMatches = text.match(/lat=["'](-?\d+\.\d+)["']/gi) || [];
+            let lonMatches = text.match(/lon=["'](-?\d+\.\d+)["']/gi) || [];
+            let limit = Math.min(latMatches.length, lonMatches.length);
+
+            for (let i = 0; i < limit; i++) {
+                let lat = parseFloat(latMatches[i].replace(/lat=["']/i, '').replace(/["']/, ''));
+                let lon = parseFloat(lonMatches[i].replace(/lon=["']/i, '').replace(/["']/, ''));
+
+                if (!isNaN(lat) && !isNaN(lon)) {
+                    trackPoints.push([lat, lon]);
+                }
+            }
+
+            let matchedList = Array.from(foundNumbers);
+
+            if (matchedList.length > 0) {
+                // Sla nummers op
+                matchedList.forEach(num => visitedSet.add(num));
+                saveState();
+
+                // Teken de GPX-route op de kaart
+                if (trackPoints.length > 0) {
+                    if (currentGpxTrack) map.removeLayer(currentGpxTrack);
+                    currentGpxTrack = L.polyline(trackPoints, { color: '#38bdf8', weight: 4, opacity: 0.85 }).addTo(map);
+                    map.fitBounds(currentGpxTrack.getBounds()); // Zoom direct in op het spoor
+                }
+
+                // Ophalen van knooppunten forceren op de nieuwe locatie
+                setTimeout(fetchDataForBounds, 600);
+
+                alert('🎉 GPX Geladen!\n\n✅ ' + matchedList.length + ' knooppunten afgevinkt.');
+            } else {
+                alert('⚠️ Geen knooppuntnummers herkend in dit bestand.');
+            }
+        } catch (err) {
+            alert('Fout bij verwerken: ' + err.message);
+        }
+    });
+</script>!DOCTYPE html>
 <html lang="nl">
 <head>
     <meta charset="UTF-8">
