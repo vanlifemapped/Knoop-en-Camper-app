@@ -30,6 +30,244 @@
         
         /* Markers Styling */
         .node-icon { 
+            background: #22c55e; 
+            border: 2px solid white; 
+            color: white; 
+            font-weight: bold; 
+            border-radius: 50%; 
+            text-align: center; 
+            font-size: 11px; 
+            box-shadow: 0 0 10px rgba(34, 197, 94, 0.8); 
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .node-icon.off { 
+            background: #64748b; 
+            box-shadow: none; 
+            opacity: 0.7; 
+        }
+        
+        .camper-pin { font-size: 22px; text-align: center; line-height: 30px; filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.5)); }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <header>
+        <div class="top-row">
+            <h1>🚴 Knoop & Camper</h1>
+            <div class="header-btns">
+                <button class="reset-btn" onclick="hardReset()">🗑️ Schoon Schip</button>
+                <label for="gpx-file" class="upload-btn">📂 Upload GPX</label>
+                <input type="file" id="gpx-file" accept=".gpx" />
+            </div>
+        </div>
+        <div class="search-bar">
+            <input type="text" id="search-input" class="search-input" placeholder="🔍 Zoek plaats (bijv. Culemborg...)" />
+            <button class="search-btn" onclick="searchLocation()">Zoek</button>
+        </div>
+    </header>
+    
+    <div id="map"></div>
+
+    <div class="stats-bar">
+        <div class="stat-item">
+            <span id="visited-count" class="stat-val">0</span>
+            Afgevinkt
+        </div>
+        <div class="stat-item">
+            <span id="camper-count" class="stat-val">0</span>
+            Camperplekken
+        </div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+    // 1. Initialisatie
+    const map = L.map('map').setView([51.955, 5.320], 11);
+
+    // OpenFietsMap / OSM Hot tegels (hier staan alle fietsknooppunten al standaard op de achtergrondkaart!)
+    L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 19
+    }).addTo(map);
+
+    // Lagen voor GPX
+    let mapLayers = L.layerGroup().addTo(map);
+    
+    // Geheugen laden
+    let gpxNodes = JSON.parse(localStorage.getItem('myGpxNodes') || '[]');
+    let customCampers = JSON.parse(localStorage.getItem('customCampers') || '[]');
+
+    renderAll();
+
+    function hardReset() {
+        if (confirm("Wil je alle opgeslagen routes en knooppunten wissen?")) {
+            localStorage.clear();
+            gpxNodes = [];
+            customCampers = [];
+            renderAll();
+        }
+    }
+
+    function save() {
+        localStorage.setItem('myGpxNodes', JSON.stringify(gpxNodes));
+        localStorage.setItem('customCampers', JSON.stringify(customCampers));
+        updateStats();
+    }
+
+    function updateStats() {
+        let count = gpxNodes.filter(n => n.active).length;
+        document.getElementById('visited-count').innerText = count;
+        document.getElementById('camper-count').innerText = customCampers.length;
+    }
+
+    // Teken alle elementen op de kaart
+    function renderAll() {
+        mapLayers.clearLayers();
+        let trackPoints = [];
+
+        // 1. GPX Knooppunten
+        gpxNodes.forEach((node, index) => {
+            let pos = [node.lat, node.lng];
+            trackPoints.push(pos);
+
+            let icon = L.divIcon({
+                className: 'node-icon' + (node.active ? '' : ' off'),
+                html: `<span>${node.num}</span>`,
+                iconSize: [26, 26],
+                iconAnchor: [13, 13]
+            });
+
+            let marker = L.marker(pos, { icon: icon });
+            
+            // Klik om aan/uit te vinken
+            marker.on('click', () => {
+                gpxNodes[index].active = !gpxNodes[index].active;
+                save();
+                renderAll();
+            });
+
+            mapLayers.addLayer(marker);
+        });
+
+        // 2. GPX Routelijn
+        if (trackPoints.length > 0) {
+            let line = L.polyline(trackPoints, { color: '#38bdf8', weight: 4, opacity: 0.8 });
+            mapLayers.addLayer(line);
+        }
+
+        // 3. Eigen Camperplaatsen
+        customCampers.forEach(spot => {
+            let camperIcon = L.divIcon({ html: '🚐', className: 'camper-pin', iconSize: [30, 30], iconAnchor: [15, 15] });
+            let m = L.marker([spot.lat, spot.lng], { icon: camperIcon }).bindPopup(`<b>Camperplaats</b><br>Toegevoegd op ${spot.date}`);
+            mapLayers.addLayer(m);
+        });
+
+        updateStats();
+    }
+
+    // Rechtermuisknop = Camperplaats toevoegen
+    map.on('contextmenu', (e) => {
+        let d = new Date().toLocaleDateString('nl-NL');
+        customCampers.push({ lat: e.latlng.lat, lng: e.latlng.lng, date: d });
+        save();
+        renderAll();
+    });
+
+    // Zoeken
+    async function searchLocation() {
+        let q = document.getElementById('search-input').value.trim();
+        if (!q) return;
+        try {
+            let r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q + ' Nederland')}`);
+            let d = await r.json();
+            if (d.length > 0) map.setView([parseFloat(d[0].lat), parseFloat(d[0].lon)], 12);
+        } catch(e) {}
+    }
+    document.getElementById('search-input').addEventListener('keypress', (e) => { if (e.key === 'Enter') searchLocation(); });
+
+    // GPX Upload
+    document.getElementById('gpx-file').addEventListener('change', async function(e) {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        try {
+            let text = await file.text();
+            let parser = new DOMParser();
+            let xmlDoc = parser.parseFromString(text, "text/xml");
+            let waypoints = xmlDoc.getElementsByTagName("wpt");
+
+            let newNodes = [];
+
+            for (let i = 0; i < waypoints.length; i++) {
+                let wpt = waypoints[i];
+                let lat = parseFloat(wpt.getAttribute("lat"));
+                let lon = parseFloat(wpt.getAttribute("lon"));
+                
+                let nameTag = wpt.getElementsByTagName("name")[0];
+                let nameText = nameTag ? nameTag.textContent.trim() : "";
+
+                let numMatch = nameText.match(/\d+/);
+                if (numMatch && !isNaN(lat) && !isNaN(lon)) {
+                    let num = parseInt(numMatch[0], 10).toString();
+                    newNodes.push({ num: num, lat: lat, lng: lon, active: true });
+                }
+            }
+
+            if (newNodes.length > 0) {
+                gpxNodes = newNodes; // Vervang oude data door de nieuwe GPX
+                save();
+                renderAll();
+
+                // Inzoomen op route
+                let pts = gpxNodes.map(n => [n.lat, n.lng]);
+                map.fitBounds(L.latLngBounds(pts), { padding: [30, 30] });
+            } else {
+                alert("Geen knooppunten herkend in GPX.");
+            }
+        } catch (err) {
+            alert("Fout bij inlezen GPX.");
+        }
+    });
+</script>
+</body>
+</html>!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knoop & Camper</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: white; }
+        #app { display: flex; flex-direction: column; height: 100vh; }
+        
+        header { background: #1e293b; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid #334155; }
+        .top-row { display: flex; justify-content: space-between; align-items: center; }
+        h1 { margin: 0; font-size: 1.1rem; color: #38bdf8; display: flex; align-items: center; gap: 6px; }
+        
+        .header-btns { display: flex; gap: 6px; }
+        .upload-btn { background: #0284c7; color: white; padding: 8px 10px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border: none; display: inline-flex; align-items: center; }
+        .reset-btn { background: #ef4444; color: white; padding: 8px 10px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border: none; }
+        #gpx-file { display: none; }
+
+        .search-bar { display: flex; gap: 6px; }
+        .search-input { flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; font-size: 0.9rem; outline: none; }
+        .search-btn { background: #38bdf8; color: #0f172a; border: none; padding: 8px 12px; border-radius: 8px; font-weight: bold; cursor: pointer; }
+
+        #map { flex: 1; width: 100%; }
+        
+        .stats-bar { background: #1e293b; padding: 12px; display: flex; justify-content: space-around; font-weight: bold; border-top: 1px solid #334155; }
+        .stat-item { text-align: center; }
+        .stat-val { color: #22c55e; font-size: 1.2rem; display: block; }
+        
+        /* Markers Styling */
+        .node-icon { 
             background: #0284c7; 
             border: 2px solid white; 
             color: white; 
